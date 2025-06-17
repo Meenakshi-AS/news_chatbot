@@ -135,11 +135,6 @@ while True:
         print("Exiting. Thank you!")
         break
 
-    docs = retriever.get_relevant_documents(user_query)
-    if not docs:
-        print("\nSorry, no relevant information found in the selected topic database.")
-        continue
-
     result = qa.invoke({"query": user_query})
     print("\nAnswer:\n")
     print(result['result'])
