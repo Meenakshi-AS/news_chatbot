@@ -1,0 +1,30 @@
+[project]
+name = "news-chatbot"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Meenakshi-AS",email = "asmeenakshisankar@gmail.com"}
+]
+readme = "README.md"
+requires-python = "^3.10"
+dependencies = [
+    "requests (>=2.32.4,<3.0.0)",
+    "python-dotenv (>=1.1.0,<2.0.0)",
+    "beautifulsoup4 (>=4.13.4,<5.0.0)",
+    "langchain (>=0.3.25,<0.4.0)",
+    "langchain-openai (>=0.3.23,<0.4.0)",
+    "langchain-community (>=0.3.25,<0.4.0)",
+    "chromadb (>=1.0.12,<2.0.0)",
+    "tiktoken (>=0.9.0,<0.10.0)",
+    "openai (>=1.87.0,<2.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+black = "^25.1.0"
+isort = "^6.0.1"
+
