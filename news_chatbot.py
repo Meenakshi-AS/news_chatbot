@@ -1,14 +1,20 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from langchain.text_splitter import CharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 
+from langchain.chains import RetrievalQA
+from langchain_openai import ChatOpenAI
+from langchain.prompts import PromptTemplate
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 load_dotenv()
 
@@ -16,94 +22,124 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 USER_AGENT = os.getenv("USER_AGENT")
 
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+all_dbs = [d for d in os.listdir(".") if d.startswith("db_news_")]
+if all_dbs:
+    print("Available topics:")
+    for db in all_dbs:
+        print("-", db.replace("db_news_", "").replace("_", " "))
+else:
+    print("No topics found. Start by searching a new topic.")
 
-persistent_directory = "db/news_vector_store"
+query_input = input("Enter a news topic to search: ").strip().lower()
+query = query_input.replace(" ", "_")
+persistent_directory = f"db_news_{query}"
 
-def fetch_news_urls(query):
-    from_date = (datetime.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+if persistent_directory in all_dbs:
+    use_existing = input(f"Previous database for topic '{query_input}' exists. Do you want to use it? (y/n): ").strip().lower()
+else:
+    print(f"No previous database found for topic '{query_input}'. Creating new database...")
+    use_existing = 'n'
+
+if use_existing != 'y':
+    print(f"\nSearching news for topic: {query_input}\n")
+
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=3)
+
     url = "https://newsapi.org/v2/everything"
-    headers = {"User-Agent": USER_AGENT}
     params = {
-        "q": query,
-        "from": from_date,
-        "sortBy": "popularity",
-        "pageSize": 10,
+        "q": query_input,
+        "from": start_date.date(),
+        "to": end_date.date(),
+        "language": "en",
+        "sortBy": "publishedAt",
         "apiKey": NEWS_API_KEY
     }
-
-    response = requests.get(url, headers=headers, params=params)
+    response = requests.get(url, params=params)
     data = response.json()
 
-    print("\n NewsAPI full response:")
-    print(data)
-
     if data.get("status") != "ok":
-        print(" Error from NewsAPI:", data.get("code"), "-", data.get("message"))
-        return []
+        print("Error from News API:", data)
+        exit()
 
-    articles = data.get("articles", [])
-    print(f"Found {len(articles)} articles.")
-    urls = [a["url"] for a in articles if a.get("url")]
-    return urls
+    articles = data.get("articles", [])[:10]
+    if not articles:
+        print(f"No articles found for topic '{query_input}'. Please try another topic.")
+        exit()
 
-def extract_text_from_urls(urls):
+    print(f"Found {len(articles)} articles.\n")
+
     documents = []
     headers = {"User-Agent": USER_AGENT}
-    for url in urls:
-        try:
-            html = requests.get(url, headers=headers, timeout=10).text
-            soup = BeautifulSoup(html, "html.parser")
-            for script in soup(["script", "style", "noscript"]):
-                script.decompose()
-            text = soup.get_text(separator="\n").strip()
-            if len(text) > 100:
-                documents.append(Document(page_content=text, metadata={"source": url}))
-        except Exception as e:
-            print(f"Error scraping {url}: {e}")
-    return documents
+    for article in articles:
+        url_to_scrape = article.get("url", "")
+        scraped_text = ""
 
-def create_vector_store(docs):
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    split_docs = splitter.split_documents(docs)
+        if url_to_scrape:
+            try:
+                article_html = requests.get(url_to_scrape, headers=headers, timeout=5)
+                soup = BeautifulSoup(article_html.content, "html.parser")
+                paragraphs = soup.find_all("p")
+                scraped_text = "\n".join(p.get_text() for p in paragraphs if len(p.get_text().strip()) > 50)
+                if scraped_text:
+                    print(f"\n--- Scraped text preview from {url_to_scrape} ---\n\n{scraped_text[:500]}\n")
+            except Exception:
+                scraped_text = ""
 
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        fallback = article.get("content") or article.get("description") or ""
+        if not scraped_text and not fallback:
+            continue
 
-    if not os.path.exists(persistent_directory):
-        db = Chroma.from_documents(split_docs, embeddings, persist_directory=persistent_directory)
-        db.persist()
-        print(" Vector store created and persisted.")
-    else:
-        db = Chroma(persist_directory=persistent_directory, embedding_function=embeddings)
-        print(" Using existing vector store.")
+        full_text = f"Title: {article['title']}\nAuthor: {article.get('author', 'Unknown')}\nPublished: {article['publishedAt']}\nURL: {url_to_scrape}\n\n{scraped_text or fallback}"
+        documents.append(Document(page_content=full_text))
 
-    return db.as_retriever(search_type="similarity", search_kwargs={"k": 3})
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    split_docs = text_splitter.split_documents(documents)
 
-def chat_loop(retriever):
-    print("\nAsk anything about the topic (type 'exit' to quit):")
-    while True:
-        user_question = input(">> ")
-        if user_question.lower() in ("exit", "quit"):
-            print("Exiting. Thank you!")
-            break
+    if not split_docs:
+        print("No usable content was extracted from the articles. Try a different topic.")
+        exit()
 
-        results = retriever.invoke(user_question)
-        if results:
-            print("\nAnswer from articles:\n")
-            for i, doc in enumerate(results, 1):
-                print(f"[{i}] {doc.page_content[:500]}...\n")
-        else:
-            print("No relevant information found.")
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    db = Chroma(persist_directory=persistent_directory, embedding_function=embeddings)
+    db.add_documents(split_docs)
+else:
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    db = Chroma(persist_directory=persistent_directory, embedding_function=embeddings)
 
-if __name__ == "__main__":
-    user_topic = input("Enter a news topic to search: ")
-    urls = fetch_news_urls(user_topic)
-    if urls:
-        docs = extract_text_from_urls(urls)
-        if docs:
-            retriever = create_vector_store(docs)
-            chat_loop(retriever)
-        else:
-            print("No text could be extracted from articles.")
-    else:
-        print("No articles found.")
+retriever = db.as_retriever(search_kwargs={"k": 3})
+
+custom_prompt = PromptTemplate.from_template("""
+You are an assistant answering questions only using the information below.
+If the answer is not in the text, reply "Sorry, no relevant information found in the selected topic database."
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+""")
+
+qa = RetrievalQA.from_chain_type(
+    llm=ChatOpenAI(openai_api_key=OPENAI_API_KEY, temperature=0.2),
+    chain_type="stuff",
+    retriever=retriever,
+    chain_type_kwargs={"prompt": custom_prompt}
+)
+
+while True:
+    user_query = input("\nAsk anything about the topic (type 'exit' to quit):\n>> ")
+    if user_query.lower() == "exit":
+        print("Exiting. Thank you!")
+        break
+
+    docs = retriever.get_relevant_documents(user_query)
+    if not docs:
+        print("\nSorry, no relevant information found in the selected topic database.")
+        continue
+
+    result = qa.invoke({"query": user_query})
+    print("\nAnswer:\n")
+    print(result['result'])

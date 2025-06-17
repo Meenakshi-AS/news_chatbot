@@ -1,3 +1,13 @@
+.venv/
+venv/
+env/
 .env
-db/
+db_news_*/
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+.DS_Store
+.vscode/
+
