@@ -3,18 +3,13 @@ import requests
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
-
 from langchain.chains import RetrievalQA
 from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
-
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
 
 load_dotenv()
 
@@ -22,29 +17,16 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 USER_AGENT = os.getenv("USER_AGENT")
 
-all_dbs = [d for d in os.listdir(".") if d.startswith("db_news_")]
-if all_dbs:
-    print("Available topics:")
-    for db in all_dbs:
-        print("-", db.replace("db_news_", "").replace("_", " "))
-else:
-    print("No topics found. Start by searching a new topic.")
 
-query_input = input("Enter a news topic to search: ").strip().lower()
-query = query_input.replace(" ", "_")
-persistent_directory = f"db_news_{query}"
+def list_databases():
+    return [d for d in os.listdir(".") if d.startswith("db_news_")]
 
-if persistent_directory in all_dbs:
-    use_existing = input(f"Previous database for topic '{query_input}' exists. Do you want to use it? (y/n): ").strip().lower()
-else:
-    print(f"No previous database found for topic '{query_input}'. Creating new database...")
-    use_existing = 'n'
 
-if use_existing != 'y':
+def create_database(query_input, query):
     print(f"\nSearching news for topic: {query_input}\n")
 
     end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=3)
+    start_date = end_date - timedelta(days=10)
 
     url = "https://newsapi.org/v2/everything"
     params = {
@@ -60,14 +42,12 @@ if use_existing != 'y':
 
     if data.get("status") != "ok":
         print("Error from News API:", data)
-        exit()
+        return
 
     articles = data.get("articles", [])[:10]
     if not articles:
-        print(f"No articles found for topic '{query_input}'. Please try another topic.")
-        exit()
-
-    print(f"Found {len(articles)} articles.\n")
+        print(f"No articles found for topic '{query_input}'. Try another.")
+        return
 
     documents = []
     headers = {"User-Agent": USER_AGENT}
@@ -77,16 +57,14 @@ if use_existing != 'y':
 
         if url_to_scrape:
             try:
-                article_html = requests.get(url_to_scrape, headers=headers, timeout=5)
+                article_html = requests.get(url_to_scrape, headers=headers, timeout=3)
                 soup = BeautifulSoup(article_html.content, "html.parser")
                 paragraphs = soup.find_all("p")
-                scraped_text = "\n".join(p.get_text() for p in paragraphs if len(p.get_text().strip()) > 50)
-                if scraped_text:
-                    print(f"\n--- Scraped text preview from {url_to_scrape} ---\n\n{scraped_text[:500]}\n")
+                scraped_text = "\n".join(p.get_text() for p in paragraphs if len(p.get_text().strip()) > 10)
             except Exception:
                 scraped_text = ""
 
-        fallback = article.get("content") or article.get("description") or ""
+        fallback = article.get("content") or article.get("description") or article.get("title", "")
         if not scraped_text and not fallback:
             continue
 
@@ -97,21 +75,25 @@ if use_existing != 'y':
     split_docs = text_splitter.split_documents(documents)
 
     if not split_docs:
-        print("No usable content was extracted from the articles. Try a different topic.")
-        exit()
+        print("No usable content extracted from articles.")
+        return
 
     embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-    db = Chroma(persist_directory=persistent_directory, embedding_function=embeddings)
+    db = Chroma(persist_directory=f"db_news_{query}", embedding_function=embeddings)
     db.add_documents(split_docs)
-else:
+    print(f"Successfully indexed {len(split_docs)} chunks. Returning to main menu.\n")
+
+
+def run_chatbot(query):
+    persistent_directory = f"db_news_{query}"
     embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
     db = Chroma(persist_directory=persistent_directory, embedding_function=embeddings)
+    retriever = db.as_retriever(search_kwargs={"k": 3})
 
-retriever = db.as_retriever(search_kwargs={"k": 3})
-
-custom_prompt = PromptTemplate.from_template("""
-You are an assistant answering questions only using the information below.
-If the answer is not in the text, reply "Sorry, no relevant information found in the selected topic database."
+    custom_prompt = PromptTemplate.from_template("""
+You are a helpful assistant. Use only the context below to answer the question.
+If you're not sure, provide related information if available and mention it's approximate.
+Avoid saying 'no relevant information found' unless the topic is truly missing.
 
 Context:
 {context}
@@ -122,19 +104,70 @@ Question:
 Answer:
 """)
 
-qa = RetrievalQA.from_chain_type(
-    llm=ChatOpenAI(openai_api_key=OPENAI_API_KEY, temperature=0.2),
-    chain_type="stuff",
-    retriever=retriever,
-    chain_type_kwargs={"prompt": custom_prompt}
-)
+    qa = RetrievalQA.from_chain_type(
+        llm=ChatOpenAI(openai_api_key=OPENAI_API_KEY, temperature=0.3, model_name="gpt-3.5-turbo"),
+        chain_type="stuff",
+        retriever=retriever,
+        chain_type_kwargs={"prompt": custom_prompt}
+    )
 
-while True:
-    user_query = input("\nAsk anything about the topic (type 'exit' to quit):\n>> ")
-    if user_query.lower() == "exit":
-        print("Exiting. Thank you!")
-        break
+    while True:
+        user_query = input("\nAsk anything about the topic (type 'exit' to return to main menu):\n>> ")
+        if user_query.lower() == "exit":
+            break
 
-    result = qa.invoke({"query": user_query})
-    print("\nAnswer:\n")
-    print(result['result'])
+        result = qa.invoke({"query": user_query})
+        print("\nAnswer:\n")
+        print(result['result'])
+
+
+def main_menu():
+    while True:
+        print("\nMAIN MENU")
+        print("1. Enter Query")
+        print("2. Enter Chatbot")
+        print("Type 'exit' to quit")
+
+        choice = input("Enter your choice (1/2/exit): ").strip().lower()
+
+        if choice == "1":
+            query_input = input("Enter a news topic to search: ").strip().lower()
+            query = query_input.replace(" ", "_")
+            all_dbs = list_databases()
+
+            if f"db_news_{query}" in all_dbs:
+                use_existing = input("Database already exists. Use it? (y/n): ").strip().lower()
+                if use_existing != "y":
+                    create_database(query_input, query)
+            else:
+                create_database(query_input, query)
+
+        elif choice == "2":
+            all_dbs = list_databases()
+            if not all_dbs:
+                print("No databases available. Please enter a query first and come back.")
+                continue
+
+            print("Available topics:")
+            for db in all_dbs:
+                print("-", db.replace("db_news_", "").replace("_", " "))
+
+            selected_input = input("Enter a topic to start chatbot: ").strip().lower().replace(" ", "_")
+            if f"db_news_{selected_input}" in all_dbs:
+                run_chatbot(selected_input)
+            else:
+                print("Topic not found. Please check spelling or enter the query first and come back.")
+                print("Available topics:")
+                for db in all_dbs:
+                    print("-", db.replace("db_news_", "").replace("_", " "))
+
+        elif choice == "exit":
+            print("Exiting... Bye!!")
+            break
+
+        else:
+            print("Invalid choice.")
+
+
+if __name__ == "__main__":
+    main_menu()
