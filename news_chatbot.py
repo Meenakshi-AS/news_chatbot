@@ -24,17 +24,9 @@ def list_databases():
 
 def create_database(query_input, query):
     print(f"\nSearching news for topic: {query_input}\n")
-
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=10)
-
-    url = "https://newsapi.org/v2/everything"
+    url = "https://newsapi.org/v2/top-headlines"
     params = {
         "q": query_input,
-        "from": start_date.date(),
-        "to": end_date.date(),
-        "language": "en",
-        "sortBy": "publishedAt",
         "apiKey": NEWS_API_KEY
     }
     response = requests.get(url, params=params)
